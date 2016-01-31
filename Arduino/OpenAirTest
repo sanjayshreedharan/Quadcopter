@@ -1,0 +1,342 @@
+//Roll Nano-tech fully charged Kp = 3, ki = 0.1, kd = 0.5
+//Pitch Nano-tech fully charged Kp = 2.6, ki = 0.1, kd = 0.5
+
+#include<Servo.h>
+#include "I2Cdev.h"
+#include "MPU6050_6Axis_MotionApps20.h"
+#if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
+  #include "Wire.h"
+#endif
+
+#define RM1 5
+#define RM2 6
+#define PM1 9
+#define PM2 10
+
+float ROLL_Kp=3, ROLL_Ki= 0.1, ROLL_Kd=0.5;
+float PITCH_Kp=2.6, PITCH_Ki= 0, PITCH_Kd=0;
+
+#define MOTOR_MIN 800
+#define MOTOR_MAX 2000
+
+#define CONST 1000;
+
+Servo myServo1;
+Servo myServo2;
+Servo myServo3;
+Servo myServo4;
+
+MPU6050 mpu;
+
+int throttle=1300;
+int roll_sat_up=1500,roll_sat_low=1000;
+int pitch_sat_up=1500,pitch_sat_low=1000;
+float error_roll=0, error_Kd_roll, prev_error_roll=0, int_error_roll=0;
+float error_pitch=0, error_Kd_pitch, prev_error_pitch=0, int_error_pitch=0;
+int my_roll=0, my_pitch=0;
+char select;
+unsigned long int dt;
+
+#define LED_PIN 13 // (Arduino is 13, Teensy is 11, Teensy++ is 6)
+bool blinkState = false;
+
+bool dmpReady = false;  // set true if DMP init was successful
+uint8_t mpuIntStatus;   // holds actual interrupt status byte from MPU
+uint8_t devStatus;      // return status after each device operation (0 = success, !0 = error)
+uint16_t packetSize;    // expected DMP packet size (default is 42 bytes)
+uint16_t fifoCount;     // count of all bytes currently in FIFO
+uint8_t fifoBuffer[64]; // FIFO storage buffer
+int16_t gx, gy, gz;
+Quaternion q;           // [w, x, y, z]         quaternion container
+VectorInt16 aa;         // [x, y, z]            accel sensor measurements
+VectorInt16 aaReal;     // [x, y, z]            gravity-free accel sensor measurements
+VectorInt16 aaWorld;    // [x, y, z]            world-frame accel sensor measurements
+VectorFloat gravity;    // [x, y, z]            gravity vector
+float euler[3];         // [psi, theta, phi]    Euler angle container
+float ypr[3];           // [yaw, pitch, roll]   yaw/pitch/roll container and gravity vector
+uint8_t teapotPacket[14] = { '$', 0x02, 0,0, 0,0, 0,0, 0,0, 0x00, 0x00, '\r', '\n' };
+
+volatile bool mpuInterrupt = false;     // indicates whether MPU interrupt pin has gone high
+void dmpDataReady() {
+    mpuInterrupt = true;
+}
+
+void setup() 
+{
+    #if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
+        Wire.begin();
+        TWBR = 24; // 400kHz I2C clock (200kHz if CPU is 8MHz)
+    #elif I2CDEV_IMPLEMENTATION == I2CDEV_BUILTIN_FASTWIRE
+        Fastwire::setup(400, true);
+    #endif
+    Serial.begin(115200);
+    while (!Serial); // wait for Leonardo enumeration, others continue immediately
+    Serial.println(F("Initializing I2C devices..."));
+    mpu.initialize();
+    Serial.println(F("Testing device connections..."));
+    Serial.println(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
+    Serial.println(F("\nSend any character to begin DMP programming and demo: "));
+    while (Serial.available() && Serial.read()); // empty buffer
+    while (!Serial.available());                 // wait for data
+    select=Serial.read();
+    while (Serial.available() && Serial.read()); // empty buffer again
+    Serial.println(F("Initializing DMP..."));
+    devStatus = mpu.dmpInitialize();
+    mpu.setXAccelOffset(1000);
+    mpu.setYAccelOffset(-1747);
+    mpu.setZAccelOffset(1876);
+    mpu.setXGyroOffset(220);
+    mpu.setYGyroOffset(76);
+    mpu.setZGyroOffset(-85);
+    //    mpu.setZAccelOffset(1788); // 1688 factory default for my test chip
+    if (devStatus == 0) {
+        Serial.println(F("Enabling DMP..."));
+        mpu.setDMPEnabled(true);
+        Serial.println(F("Enabling interrupt detection (Arduino external interrupt 0)..."));
+        attachInterrupt(0, dmpDataReady, RISING);
+        mpuIntStatus = mpu.getIntStatus();
+        Serial.println(F("DMP ready! Waiting for first interrupt..."));
+        dmpReady = true;
+        packetSize = mpu.dmpGetFIFOPacketSize();
+    } else {
+        Serial.print(F("DMP Initialization failed (code "));
+        Serial.print(devStatus);
+        Serial.println(F(")"));
+    }
+    pinMode(LED_PIN, OUTPUT);
+    Serial.println(select);
+    if (select=='1')
+    {
+    myServo1.attach(RM1);  // roll motor 1 
+    myServo2.attach(RM2);  // roll motor 2
+    myServo3.attach(PM1);  // pitch motor 1
+    myServo4.attach(PM2); // pitch motor 2
+    myServo1.writeMicroseconds(MOTOR_MAX);
+    myServo2.writeMicroseconds(MOTOR_MAX);
+    myServo3.writeMicroseconds(MOTOR_MAX);
+    myServo4.writeMicroseconds(MOTOR_MAX);
+    delay(2000);
+    myServo1.writeMicroseconds(MOTOR_MIN);
+    myServo2.writeMicroseconds(MOTOR_MIN);
+    myServo3.writeMicroseconds(MOTOR_MIN);
+    myServo4.writeMicroseconds(MOTOR_MIN);
+    delay(2000);
+    Serial.println("Initialization done");
+    }
+}
+
+void loop()
+{
+  unsigned long int start_timer = micros();
+  if(Serial.available())
+  {
+    select=Serial.read();
+    if(select=='+')
+    {
+      throttle += 10;
+      select='2';
+    }
+    else if(select=='-')
+    {
+      throttle -= 10;
+      select='2';
+    }
+    else if(select=='!')
+    {
+        int value = DataRead();
+        ROLL_Kp= (float)value/CONST;
+        Serial.print("Roll Kp :");
+        Serial.print(ROLL_Kp);
+    }
+    else if(select=='#')
+    {
+        int value = DataRead();
+        ROLL_Kd= (float)value/CONST;
+    }
+    else if(select=='@')
+    {
+        int value = DataRead();
+        ROLL_Ki= (float)value/CONST;
+        Serial.print("Roll Ki :");
+        Serial.print(ROLL_Ki);
+    }
+    else if(select=='%')
+    {
+        int value = DataRead();
+        PITCH_Kp= (float)value/CONST;
+        Serial.print("Pitch Kp :");
+        Serial.print(PITCH_Kp);
+    }
+    else if(select=='&')
+    {
+        int value = DataRead();
+        PITCH_Kd= (float)value/CONST;
+    }
+    else if(select=='^')
+    {
+        int value = DataRead();
+        PITCH_Ki= (float)value/CONST;
+        Serial.print("Pitch Ki :");
+        Serial.print(PITCH_Ki);
+    }
+    else if(select=='$')
+    {
+        my_roll = DataRead();
+        Serial.print("Roll :");
+        Serial.print(my_roll);
+    }
+    else if(select=='*')
+    {
+        my_pitch = DataRead();
+        Serial.print("Pitch :");
+        Serial.print(my_pitch);
+    }
+    Serial.println(throttle);
+  }
+  if (!dmpReady) return;
+    while (!mpuInterrupt && fifoCount < packetSize) {}
+    mpuInterrupt = false;
+    mpuIntStatus = mpu.getIntStatus();
+    fifoCount = mpu.getFIFOCount();
+    if ((mpuIntStatus & 0x10) || fifoCount == 1024) 
+    {
+        mpu.resetFIFO();
+        Serial.println(F("FIFO overflow!"));
+    } 
+    else if (mpuIntStatus & 0x02) 
+    {
+        while (fifoCount < packetSize) fifoCount = mpu.getFIFOCount();
+        mpu.getFIFOBytes(fifoBuffer, packetSize);
+        fifoCount -= packetSize;
+        mpu.dmpGetQuaternion(&q, fifoBuffer);
+        mpu.dmpGetGravity(&gravity, &q);
+        mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+        mpu.getRotation(&gx, &gy, &gz);
+        gx=gx/131.0;
+        gy=gy/131.0;
+        gz=gz/131.0;
+        blinkState = !blinkState;
+        digitalWrite(LED_PIN, blinkState);
+    }
+    error_roll=(my_roll-(ypr[2] * 180/M_PI));
+    error_pitch=(my_pitch-(ypr[1] * 180/M_PI));
+    int_error_roll+=(error_roll*0.015);
+    int_error_pitch+=(error_pitch*0.015);
+    if(int_error_roll>100)
+      int_error_roll=100;
+    else if(int_error_roll<-100)
+      int_error_roll=-100;
+    if(int_error_pitch>100)
+      int_error_pitch=100;
+    else if(int_error_pitch<-100)
+      int_error_pitch=-100;
+    error_Kd_roll=(error_roll-prev_error_roll)*150;
+    prev_error_roll=error_roll;
+    error_Kd_pitch=(error_pitch-prev_error_pitch)*150;
+    prev_error_pitch=error_pitch;
+    Serial.print("Actual Roll :");
+    float actual_roll = (ypr[2] * 180/M_PI);
+    Serial.print(actual_roll);
+    Serial.print("\t");
+    Serial.print("Error :");
+    Serial.print(error_roll);
+    Serial.print("\t");
+    Serial.print("Int Error :");
+    Serial.print(int_error_roll);
+    Serial.print("\t");
+    Serial.print("Error Kd :");
+    Serial.print(error_Kd_roll);
+    Serial.print("\n");
+    Serial.print("Actual Pitch :");
+    float actual_pitch = (ypr[1] * 180/M_PI);
+    Serial.print(actual_pitch);
+    Serial.print("\t");
+    Serial.print("Error :");
+    Serial.print(error_pitch);
+    Serial.print("\t");
+    Serial.print("Int Error :");
+    Serial.print(int_error_pitch);
+    Serial.print("\t");
+    Serial.print("Error Kd :");
+    Serial.print(error_Kd_pitch);
+    Serial.print("\n");
+//    Serial.print("Throttle :");
+//    Serial.print(throttle);
+  if(select=='2')
+  {
+    //RollTest();
+    PitchTest();
+  }
+  else if(select=='3')
+  {
+    myServo1.writeMicroseconds(MOTOR_MIN);
+    myServo2.writeMicroseconds(MOTOR_MIN);
+    myServo3.writeMicroseconds(MOTOR_MIN);
+    myServo4.writeMicroseconds(MOTOR_MIN);
+    Serial.println("3 Completed");
+  }
+  unsigned long int stop_timer = micros();
+  dt = stop_timer-start_timer;
+  Serial.print("DT :");
+  Serial.println(dt);
+}
+
+void RollTest()
+{
+  int m1;
+  int m2;
+  m1=throttle+(ROLL_Kp*error_roll)+(ROLL_Kd*error_Kd_roll)+(ROLL_Ki*int_error_roll);
+  m2=throttle-(ROLL_Kp*error_roll)-(ROLL_Kd*error_Kd_roll)-(ROLL_Ki*int_error_roll);
+  if(m1>roll_sat_up)
+    m1=roll_sat_up;
+  else if(m1<roll_sat_low)
+    m1=roll_sat_low;
+  if(m2>roll_sat_up)
+    m2=roll_sat_up;
+  else if(m2<roll_sat_low)
+    m2=roll_sat_low;
+  Serial.print("M1 :");
+  Serial.print(m1);
+  Serial.print("\t"); 
+  Serial.print("M2 :");
+  Serial.println(m2);
+  myServo1.writeMicroseconds(m1);
+  myServo2.writeMicroseconds(m2);
+}
+
+void PitchTest()
+{
+  int m1;
+  int m2;
+  m1=throttle+(PITCH_Kp*error_pitch)+(PITCH_Kd*error_Kd_pitch)+(PITCH_Ki*int_error_pitch);
+  m2=throttle-(PITCH_Kp*error_pitch)-(PITCH_Kd*error_Kd_pitch)-(PITCH_Ki*int_error_pitch);
+  if(m1>pitch_sat_up)
+    m1=pitch_sat_up;
+  else if(m1<pitch_sat_low)
+    m1=pitch_sat_low;
+  if(m2>pitch_sat_up)
+    m2=pitch_sat_up;
+  else if(m2<pitch_sat_low)
+    m2=pitch_sat_low;
+  Serial.print("M1 :");
+  Serial.print(m1);
+  Serial.print("\t"); 
+  Serial.print("M2 :");
+  Serial.println(m2);
+  myServo3.writeMicroseconds(m2);
+  myServo4.writeMicroseconds(m1);
+}
+
+int DataRead()
+{
+  char buff[10];
+  int i=0;
+  while(Serial.available())
+  {
+    buff[i]=Serial.read();
+    i++;
+  }
+  int incomingValue = atoi(buff);
+  select='2';
+  return incomingValue;
+}
