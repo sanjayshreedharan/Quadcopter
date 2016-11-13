@@ -7,7 +7,7 @@ This project endeavours to design a low cost indigenous auto-pilot system for a 
 
 [![DEMO Video](http://img.youtube.com/vi/Ulz9EfYzbyA/0.jpg)](http://www.youtube.com/watch?v=Ulz9EfYzbyA)
 
-# Instructions
+# Deployment Instructions
 The frame can either be designed or it can be bought. For speedy development, if you don't have much time in your hands I would suggest to go with buying one. 
 
 We obviously designed our own frame and since frame design and construction as such is a huge task, I would follow up with a tutorial for those of you who wish to design your own frames.
